@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +22,7 @@ const (
 
 type (
 	SteamGame struct {
+		Id             int64  `json:"-"`
 		Name           string `json:"name,omitempty"`
 		ReviewScore    int    `json:"review_score,omitempty"`
 		ReviewDesc     string `json:"review_desc,omitempty"`
@@ -47,7 +48,7 @@ type (
 	}
 )
 
-func getUserWishlist(userId string) (map[string]SteamGame, error) {
+func getUserWishlist(userId string) ([]SteamGame, error) {
 	c := colly.NewCollector(colly.AllowedDomains(STEAM_DOMAIN))
 
 	c.OnError(func(r *colly.Response, e error) {
@@ -55,10 +56,11 @@ func getUserWishlist(userId string) (map[string]SteamGame, error) {
 	})
 
 	// gameId -> gameInfo map
-	var steamGames map[string]SteamGame
+	var steamGamesMap map[string]SteamGame
+	var steamGames []SteamGame
 
 	c.OnResponse(func(r *colly.Response) {
-		err := json.Unmarshal(r.Body, &steamGames)
+		err := json.Unmarshal(r.Body, &steamGamesMap)
 		if err != nil {
 			fmt.Println(err)
 			return
@@ -67,27 +69,31 @@ func getUserWishlist(userId string) (map[string]SteamGame, error) {
 
 	c.Visit(fmt.Sprintf("https://store.steampowered.com/wishlist/profiles/%s/wishlistdata", userId))
 
+	// move map "id" data to slice
+	for gameId, game := range steamGamesMap {
+		err := errors.New("")
+		game.Id, err = strconv.ParseInt(gameId, 0, 64)
+		if err != nil {
+			fmt.Println(err)
+			return nil, err
+		}
+		steamGames = append(steamGames, game)
+	}
+
 	return steamGames, nil
 }
 
-func waitRandomly() {
-	time.Sleep(time.Duration(rand.Intn(30)) * time.Second)
-}
-
-func lookupBestPrice(steamGames map[string]SteamGame) error {
+func lookupBestPrice(steamGames []SteamGame) error {
 	c := colly.NewCollector(colly.AllowedDomains(AKS_DOMAIN))
 
-	for _, gameData := range steamGames {
-		waitRandomly()
+	aksRequests := 0
+	for i, gameData := range steamGames {
 		bestPrice := ""
 		gameNameSanitized := strings.Replace(gameData.Name, " ", "+", -1)
 
 		c.OnError(func(r *colly.Response, e error) {
 			fmt.Printf("Error while scraping: %s\n", e.Error())
-			for i := 0; i <= 5; i++ {
-				waitRandomly()
-				r.Request.Retry()
-			}
+			aksRequests++
 		})
 
 		c.OnHTML(BEST_PRICE_QUERY, func(h *colly.HTMLElement) {
@@ -105,15 +111,20 @@ func lookupBestPrice(steamGames map[string]SteamGame) error {
 			fmt.Println(errors.New(fmt.Sprintf("ERROR - Cannot convert price to float for game %s: %s", gameData.Name, err)))
 			continue
 		}
-		gameData.BestPrice = bestPriceFloat
-		fmt.Println("Best price for: ", gameData.Name, "is: ", gameData.BestPrice)
+		steamGames[i].BestPrice = bestPriceFloat
+		fmt.Println("Best price for: ", gameData.Name, "is: ", steamGames[i].BestPrice)
+		aksRequests++
+		if aksRequests >= 5 {
+			time.Sleep(30 * time.Second)
+			aksRequests = 0
+		}
 	}
 	return nil
 }
 
 func main() {
 	// define SteamGame map object & get user wishlist
-	var wishlistedGames map[string]SteamGame
+	var wishlistedGames []SteamGame
 	wishlistedGames, err := getUserWishlist("76561198062700091")
 	if err != nil {
 		fmt.Println(err)
@@ -127,7 +138,13 @@ func main() {
 		return
 	}
 
-	//for _, element := range wishlistedGames {
-	//	fmt.Println("Best price for: ", element.Name, "is: ", element.BestPrice)
-	//}
+	sort.Slice(wishlistedGames, func(i, j int) bool {
+		return wishlistedGames[i].BestPrice < wishlistedGames[j].BestPrice
+	})
+
+	fmt.Println("Price", "\t", "Game")
+
+	for _, game := range wishlistedGames {
+		fmt.Println(game.BestPrice, "\t", game.Name)
+	}
 }
